@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Klaus' Column To‑Do</title>
+  <style>
+    :root{
+      --bg:#0b0e12; --panel:#111823; --muted:#8aa0b4; --text:#e7eef5;
+      --accent:#5cc8ff; --ok:#38ef7d; --danger:#ff6b6b; --border:#223042; --next:#ffd166;
+      --radius:16px;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial}
+    header{position:sticky;top:0;z-index:3;background:linear-gradient(180deg, rgba(11,14,18,.95), rgba(11,14,18,.6));backdrop-filter: blur(6px);border-bottom:1px solid var(--border)}
+    .container{max-width:1200px;margin:0 auto;padding:12px 16px}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .toolbar input[type="text"], .toolbar button{
+      background:var(--panel);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:10px;outline:none
+    }
+    .toolbar input[type="text"]{min-width:260px}
+    .toolbar button{cursor:pointer}
+    .toolbar button:hover{border-color:var(--accent)}
+    .badge{font-size:11px;border:1px solid var(--border);padding:2px 6px;border-radius:8px;color:var(--muted)}
+
+    main{padding:12px 16px}
+    .board{display:grid;grid-auto-flow:column;grid-auto-columns:320px;gap:12px;overflow-x:auto;padding-bottom:8px}
+    .col{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);display:flex;flex-direction:column;min-height:60vh}
+    .col.drag-over{outline:2px dashed var(--accent); outline-offset:-6px}
+    .col-header{position:sticky;top:52px;background:linear-gradient(180deg, rgba(17,24,35,.96), rgba(17,24,35,.8));backdrop-filter: blur(4px);z-index:2;border-bottom:1px solid var(--border);padding:10px 12px;display:flex;gap:8px;align-items:center}
+    .col-title{flex:1 1 auto;background:transparent;border:none;outline:none;color:var(--text);font-weight:700;font-size:15px}
+    .col-type{font-size:11px;color:var(--muted)}
+    .col-handle{cursor:grab;opacity:.7}
+
+    .tasks{padding:10px 10px 6px 10px;display:flex;flex-direction:column;gap:8px}
+    .task{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:#0f1420}
+    .task.dragging{opacity:.5}
+    .task .check{margin-top:2px}
+    .task .title{flex:1 1 auto;background:transparent;border:none;outline:none;color:var(--text);font-size:14px}
+    .task.next{border-color:#4a5568; box-shadow:0 0 0 2px var(--next) inset}
+    .task.completed .title{color:#7d8b98;text-decoration:line-through}
+
+    .col-footer{margin-top:auto;padding:8px 10px;border-top:1px dashed #1c2836;display:flex;gap:8px}
+    .col-footer button{background:transparent;border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:8px;cursor:pointer}
+    .col-footer button:hover{border-color:var(--accent)}
+
+    .ghost-slot{height:38px;border:2px dashed #314258;border-radius:10px}
+
+    .fixed{user-select:none}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="container toolbar">
+      <strong>🧠 Klaus' Columns</strong>
+      <input id="search" type="text" placeholder="Filter tasks (live)…" />
+      <button id="add-project">+ Project column</button>
+      <button id="export">Export</button>
+      <label><input id="import" class="hidden" type="file" accept="application/json"/> <span class="badge" style="cursor:pointer" onclick="document.getElementById('import').click()">Import</span></label>
+      <span class="badge" id="status">Saved</span>
+      <span class="badge">Local‑first • Offline</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="board" class="board"></div>
+  </main>
+
+<script>
+// =============== Data Model ===============
+const LS_KEY = 'klaus_columns_v1';
+const el = s=>document.querySelector(s); const els = s=>Array.from(document.querySelectorAll(s));
+const uid = ()=> Math.random().toString(36).slice(2,10);
+
+// Columns: inbox (pinned left), project columns (draggable), quick (pinned right)
+let state = { columns: [] };
+
+function newTask(title='New task'){ return { id:uid(), title, completed:false, createdAt:Date.now() }; }
+function newProject(title='New Project'){ return { id:uid(), type:'project', title, tasks:[] }; }
+
+function load(){ const raw = localStorage.getItem(LS_KEY); if(raw){ try{ state=JSON.parse(raw) }catch{} }
+  if(!state.columns?.length){ seed(); save(); }
+}
+function save(){ localStorage.setItem(LS_KEY, JSON.stringify(state)); markSaved(); }
+function markDirty(){ el('#status').textContent='Unsaved…'; }
+function markSaved(){ el('#status').textContent='Saved'; }
+
+function seed(){
+  state.columns = [
+    { id:uid(), type:'inbox', title:'Inbox', tasks:[ newTask('Sample: clarify scope'), newTask('Decide UI polish'), newTask('Plan next steps') ]},
+    newProject('Project A'),
+    newProject('Project B'),
+    { id:uid(), type:'quick', title:'Quick Tasks', tasks:[ newTask('5‑min: book table'), newTask('Email Dan about slides') ]}
+  ];
+  state.columns[1].tasks.push(newTask('Outline MVP')); state.columns[1].tasks.push(newTask('Implement drag & drop'));
+  state.columns[2].tasks.push(newTask('Write brief')); state.columns[2].tasks.push(newTask('Review notes'));
+}
+
+// =============== Rendering ===============
+function render(){
+  const board = el('#board'); board.innerHTML='';
+  const filter = el('#search').value.trim().toLowerCase();
+
+  state.columns.forEach((col, idx)=>{
+    const colEl = document.createElement('div'); colEl.className='col'; colEl.dataset.colId = col.id;
+    colEl.draggable = (col.type==='project');
+
+    // Header
+    const header = document.createElement('div'); header.className='col-header';
+    const h = document.createElement('input'); h.className='col-title'; h.value=col.title; h.disabled = (col.type!=='project');
+    h.addEventListener('input', ()=>{ col.title=h.value; markDirty(); });
+    h.addEventListener('blur', ()=>{ save(); render(); });
+
+    const typeSpan = document.createElement('span'); typeSpan.className='col-type fixed'; typeSpan.textContent = col.type==='project'?'project':(col.type==='inbox'?'inbox':'quick');
+    const handle = document.createElement('span'); handle.className='col-handle fixed'; handle.textContent = (col.type==='project'?'⋮⋮':'');
+
+    const delBtn = document.createElement('button'); delBtn.textContent='delete'; delBtn.className='fixed'; delBtn.style.display = col.type==='project'? 'inline-block':'none';
+    delBtn.addEventListener('click', ()=>{ if(confirm('Delete this project column?')){ state.columns.splice(idx,1); save(); render(); }});
+
+    header.append(h, typeSpan, handle, delBtn);
+
+    // Tasks
+    const list = document.createElement('div'); list.className='tasks'; list.dataset.colId=col.id; list.addEventListener('dragover', onTaskDragOver); list.addEventListener('drop', onTaskDrop);
+
+    // Compute next actionable: last incomplete task
+    const lastIncomplete = [...col.tasks].reverse().find(t=>!t.completed);
+
+    col.tasks.forEach((t, tIdx)=>{
+      if(filter && !t.title.toLowerCase().includes(filter)) return;
+      const item = document.createElement('div'); item.className='task'+(t.completed?' completed':'')+((lastIncomplete&&lastIncomplete.id===t.id)?' next':'');
+      item.draggable = true; item.dataset.taskId=t.id; item.dataset.colId=col.id; item.addEventListener('dragstart', onTaskDragStart); item.addEventListener('dragend', onTaskDragEnd);
+
+      const cb = document.createElement('input'); cb.type='checkbox'; cb.className='check'; cb.checked=t.completed; cb.addEventListener('change', ()=>{ t.completed=cb.checked; save(); render(); });
+      const inp = document.createElement('input'); inp.className='title'; inp.value=t.title; inp.addEventListener('input', ()=>{ t.title=inp.value; markDirty(); }); inp.addEventListener('blur', ()=>{ save(); render(); });
+
+      const del = document.createElement('button'); del.textContent='×'; del.title='Delete task'; del.addEventListener('click', ()=>{ col.tasks.splice(tIdx,1); save(); render(); });
+      item.append(cb, inp, del); list.appendChild(item);
+    });
+
+    // Footer
+    const footer = document.createElement('div'); footer.className='col-footer';
+    const addTaskBtn = document.createElement('button'); addTaskBtn.textContent='+ task'; addTaskBtn.addEventListener('click', ()=>{ col.tasks.push(newTask()); save(); render(); });
+    footer.append(addTaskBtn);
+
+    colEl.append(header, list, footer);
+
+    // Column drag to reorder (projects only)
+    if(col.type==='project'){
+      colEl.addEventListener('dragstart', e=>{ if(e.target!==colEl) return; e.dataTransfer.setData('text/col', col.id); setTimeout(()=> colEl.classList.add('dragging'),0); });
+      colEl.addEventListener('dragend', ()=> colEl.classList.remove('dragging'));
+      // allow dropping between projects, keep inbox and quick pinned
+      colEl.addEventListener('dragover', e=>{ const data=e.dataTransfer.types.includes('text/col'); if(!data) return; e.preventDefault(); colEl.classList.add('drag-over'); });
+      colEl.addEventListener('dragleave', ()=> colEl.classList.remove('drag-over'));
+      colEl.addEventListener('drop', e=>{
+        const draggedId = e.dataTransfer.getData('text/col'); if(!draggedId) return; colEl.classList.remove('drag-over');
+        const fromIdx = state.columns.findIndex(c=>c.id===draggedId);
+        const toIdx = state.columns.findIndex(c=>c.id===col.id);
+        if(fromIdx===-1||toIdx===-1) return;
+        // limit drop to between inbox (0) and quick (last)
+        const firstIdx = 1; const lastIdx = state.columns.length-2;
+        const clampedTo = Math.max(firstIdx, Math.min(lastIdx, toIdx));
+        const [moved] = state.columns.splice(fromIdx,1);
+        state.columns.splice(clampedTo,0,moved);
+        save(); render();
+      });
+      colEl.addEventListener('dragenter', e=>{ if(e.dataTransfer.types.includes('text/col')) e.preventDefault(); });
+    }
+
+    board.appendChild(colEl);
+  });
+}
+
+// =============== Drag & Drop: Tasks ===============
+let dragTask = null; // {taskId, fromColId}
+function onTaskDragStart(e){ const taskId=e.currentTarget.dataset.taskId; const colId=e.currentTarget.dataset.colId; dragTask={taskId,fromColId:colId}; e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/task', taskId); e.currentTarget.classList.add('dragging'); }
+function onTaskDragEnd(e){ e.currentTarget.classList.remove('dragging'); dragTask=null; els('.ghost-slot').forEach(g=>g.remove()); }
+function onTaskDragOver(e){ if(!e.dataTransfer.types.includes('text/task')) return; e.preventDefault(); const list=e.currentTarget; const afterElement = getDragAfterElement(list, e.clientY);
+  if(!list.querySelector('.ghost-slot')){ const ghost=document.createElement('div'); ghost.className='ghost-slot'; list.appendChild(ghost); }
+  const ghost=list.querySelector('.ghost-slot');
+  if(afterElement==null) list.appendChild(ghost); else list.insertBefore(ghost, afterElement);
+}
+function onTaskDrop(e){ if(!dragTask) return; e.preventDefault(); const toColId=e.currentTarget.dataset.colId; moveTask(dragTask.fromColId, toColId, dragTask.taskId, e.currentTarget); save(); render(); }
+function getDragAfterElement(container, y){ const draggables=[...container.querySelectorAll('.task:not(.dragging)')];
+  return draggables.reduce((closest, child)=>{ const box=child.getBoundingClientRect(); const offset=y - box.top - box.height/2; if(offset<0 && offset>closest.offset){ return {offset, element:child}; } else { return closest; } }, {offset:Number.NEGATIVE_INFINITY}).element;
+}
+function moveTask(fromColId, toColId, taskId, targetList){
+  const fromCol = state.columns.find(c=>c.id===fromColId); const toCol = state.columns.find(c=>c.id===toColId); if(!fromCol||!toCol) return;
+  const idx = fromCol.tasks.findIndex(t=>t.id===taskId); if(idx===-1) return; const [task]=fromCol.tasks.splice(idx,1);
+  // Insert at ghost position if exists
+  const ghostIndex = Array.from(targetList.children).indexOf(targetList.querySelector('.ghost-slot'));
+  if(ghostIndex===-1 || ghostIndex>toCol.tasks.length) toCol.tasks.push(task); else toCol.tasks.splice(ghostIndex,0,task);
+}
+
+// =============== Toolbar Actions ===============
+ el('#add-project').addEventListener('click', ()=>{ const i = state.columns.length-1; state.columns.splice(i,0,newProject('New Project')); save(); render(); });
+ el('#export').addEventListener('click', ()=>{ const data = new Blob([JSON.stringify(state,null,2)], {type:'application/json'}); const url=URL.createObjectURL(data); const a=document.createElement('a'); a.href=url; a.download='klaus-columns.json'; a.click(); URL.revokeObjectURL(url); });
+ el('#import').addEventListener('change', e=>{ const f=e.target.files?.[0]; if(!f) return; const r=new FileReader(); r.onload=()=>{ try{ const obj=JSON.parse(r.result); if(obj.columns){ state=obj; save(); render(); } else alert('Invalid file'); }catch(err){ alert('Import failed: '+err.message); } }; r.readAsText(f); });
+ el('#search').addEventListener('input', ()=> render());
+
+// Boot
+load(); render(); markSaved();
+</script>
+</body>
+</html>
